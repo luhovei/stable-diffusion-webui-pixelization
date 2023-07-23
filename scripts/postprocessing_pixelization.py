@@ -9,6 +9,7 @@ import torch
 import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
+import hitherdither
 
 from pixelization.models.networks import define_G
 import pixelization.models.c2pGen
@@ -153,17 +154,51 @@ def process(img):
     return trans(img)[None, :, :, :]
 
 
-def to_image(tensor, pixel_size, upscale_after):
+def to_image(tensor, pixel_size, upscale_after, color_palette, palette_method, dithering_strength, dither, when):
     img = tensor.data[0].cpu().float().numpy()
     img = (np.transpose(img, (1, 2, 0)) + 1) / 2.0 * 255.0
     img = img.astype(np.uint8)
     img = Image.fromarray(img)
     img = img.resize((img.size[0]//4, img.size[1]//4), resample=Image.Resampling.NEAREST)
+    
+    if when == 0: #after pixelization
+        palette_methods = {
+                "Median cut": Image.Quantize.MEDIANCUT,
+                "Maximum coverage": Image.Quantize.MAXCOVERAGE,
+                "Fast octree": Image.Quantize.FASTOCTREE
+            }
+        quantize = palette_methods.get(palette_method, None)
+        threshold = int((16*dithering_strength)/4)
+        if color_palette > 0:
+            print("After pixelization color pallete restriction action")
+            print(f'Dithering strength: {dithering_strength} | Threshold: {threshold} | Dither:  {dither} | Dither order: {2**(dither+1)}')
+            img = img.quantize(
+                colors=int(color_palette), method=quantize, kmeans=int(color_palette), dither=Image.Dither.NONE).convert("RGB")
+            
+            img = adjust_gamma(img, 1.0 - (0.02 * dithering_strength))
+
+
+            plt = []
+            for i in img.convert("RGB").getcolors(16777216):
+                plt.append(i[1])
+
+            plt = hitherdither.palette.Palette(plt)
+            img = hitherdither.ordered.bayer.bayer_dithering(
+                img, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
+
     if upscale_after:
         img = img.resize((img.size[0]*pixel_size, img.size[1]*pixel_size), resample=Image.Resampling.NEAREST)
 
     return img
 
+def adjust_gamma(image, gamma=1.0):
+    # Create a lookup table for the gamma function
+    gamma_map = [255 * ((i / 255.0) ** (1.0 / gamma)) for i in range(256)]
+    gamma_table = bytes([(int(x / 255.0 * 65535.0) >> 8)
+                        for x in gamma_map] * 3)
+
+    # Apply the gamma correction using the lookup table
+    return image.point(gamma_table)
 
 class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
     name = "Pixelization"
@@ -176,42 +211,89 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 with FormRow():
                     enable = gr.Checkbox(False, label="Enable pixelization")
                     upscale_after = gr.Checkbox(False, label="Keep resolution")
+                    when = gr.Dropdown(choices=["After Pixelization", "Before Pixelization"], label="Apply Dithering", value="After Pixelization", type="index")
 
             with gr.Column():
                 pixel_size = gr.Slider(minimum=1, maximum=16, step=1, label="Pixel size", value=4, elem_id="pixelization_pixel_size")
+        
+            with gr.Column():
+                color_palette = gr.Slider(minimum=0, maximum=256, step=1, value=16, label="Color palette size (set to 0 to keep all colors)")
+
+            with gr.Column():
+                with FormRow():
+                        palette_methods = ['Median cut', 'Maximum coverage', 'Fast octree']
+                        palette_method = gr.Radio(choices=palette_methods, value=palette_methods[0], label='Palette extraction method')
+            with gr.Row():
+                dither = gr.Dropdown(choices=["Bayer 2x2", "Bayer 4x4", "Bayer 8x8"], label="Dither Style", value="Bayer 4x4", type="index")
+                dithering_strength = gr.Slider(minimum=1, maximum=16, step=1, label="Dithering Strength", value=2, elem_id="dithering_strength_value")
 
         return {
             "enable": enable,
             "upscale_after": upscale_after,
             "pixel_size": pixel_size,
+            "color_palette": color_palette,
+            "palette_method": palette_method,
+            "dithering_strength": dithering_strength,
+            "dither": dither,
+            "when": when,
         }
 
-    def process(self, pp: scripts_postprocessing.PostprocessedImage, enable, upscale_after, pixel_size):
+    def process(self, pp: scripts_postprocessing.PostprocessedImage, enable, upscale_after, pixel_size, color_palette, palette_method, dithering_strength, dither, when):
         if not enable:
             return
 
-        if self.model is None:
-            model = Model()
-            model.load()
+        if when == 1: #before pixelization
+            palette_methods = {
+                "Median cut": Image.Quantize.MEDIANCUT,
+                "Maximum coverage": Image.Quantize.MAXCOVERAGE,
+                "Fast octree": Image.Quantize.FASTOCTREE
+            }
+            quantize = palette_methods.get(palette_method, None)
+            threshold = int((16*dithering_strength)/4)
+            if color_palette > 0:
+                # print("Before pixelization color pallete restriction action")
+                print(f'Dithering strength: {dithering_strength} | Threshold: {threshold} | Dither:  {dither} | Dither order: {2**(dither+1)}')
+                pp.image = pp.image.quantize(
+                    colors=int(color_palette), method=quantize, kmeans=int(color_palette), dither=Image.Dither.NONE).convert("RGB")
+                
+                pp.image = adjust_gamma(pp.image, 1.0 - (0.02 * dithering_strength)) #todo: adds dithering strenght slider to UI
 
-            self.model = model
+                plt = []
+                for i in pp.image.convert("RGB").getcolors(16777216):
+                    plt.append(i[1])
 
-        self.model.to(devices.device)
+                plt = hitherdither.palette.Palette(plt)
+                pp.image = hitherdither.ordered.bayer.bayer_dithering(
+                    pp.image, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
 
-        pp.image = pp.image.resize((pp.image.width * 4 // pixel_size, pp.image.height * 4 // pixel_size))
+            
+        if pixel_size > 1:
+            if self.model is None:
+                model = Model()
+                model.load()
 
-        with torch.no_grad():
-            in_t = process(pp.image).to(devices.device)
+                self.model = model
 
-            feature = self.model.G_A_net.module.RGBEnc(in_t)
-            code = torch.asarray(pixelize_code, device=devices.device).reshape((1, 256, 1, 1))
-            adain_params = self.model.G_A_net.module.MLP(code)
-            images = self.model.G_A_net.module.RGBDec(feature, adain_params)
-            out_t = self.model.alias_net(images)
+            self.model.to(devices.device)
 
-            pp.image = to_image(out_t, pixel_size=pixel_size, upscale_after=upscale_after)
+            pp.image = pp.image.resize((pp.image.width * 4 // pixel_size, pp.image.height * 4 // pixel_size))
+            
+            with torch.no_grad():
+                in_t = process(pp.image).to(devices.device)
 
-        self.model.to(devices.cpu)
+                feature = self.model.G_A_net.module.RGBEnc(in_t)
+                code = torch.asarray(pixelize_code, device=devices.device).reshape((1, 256, 1, 1))
+                adain_params = self.model.G_A_net.module.MLP(code)
+                images = self.model.G_A_net.module.RGBDec(feature, adain_params)
+                out_t = self.model.alias_net(images)
+
+                pp.image = to_image(out_t, pixel_size=pixel_size, upscale_after=upscale_after, color_palette=color_palette, palette_method=palette_method, dithering_strength=dithering_strength, dither=dither, when=when)
+
+            self.model.to(devices.cpu)
 
         pp.info["Pixelization pixel size"] = pixel_size
+        pp.info["Pixelization color palette"] = color_palette
+        pp.info["Pixelization palette method"] = palette_method
+        pp.info["Dither Strength"] = dithering_strength
+        pp.info["Dither Style"] = dither
 
