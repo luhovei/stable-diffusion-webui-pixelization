@@ -170,8 +170,6 @@ def to_image(tensor, pixel_size, upscale_after, color_palette, palette_method, d
         quantize = palette_methods.get(palette_method, None)
         threshold = int((16*dithering_strength)/4)
         if color_palette > 0:
-            print("After pixelization color pallete restriction action")
-            print(f'Dithering strength: {dithering_strength} | Threshold: {threshold} | Dither:  {dither} | Dither order: {2**(dither+1)}')
             img = img.quantize(
                 colors=int(color_palette), method=quantize, kmeans=int(color_palette), dither=Image.Dither.NONE).convert("RGB")
             
@@ -251,8 +249,6 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
             quantize = palette_methods.get(palette_method, None)
             threshold = int((16*dithering_strength)/4)
             if color_palette > 0:
-                # print("Before pixelization color pallete restriction action")
-                print(f'Dithering strength: {dithering_strength} | Threshold: {threshold} | Dither:  {dither} | Dither order: {2**(dither+1)}')
                 pp.image = pp.image.quantize(
                     colors=int(color_palette), method=quantize, kmeans=int(color_palette), dither=Image.Dither.NONE).convert("RGB")
                 
