@@ -4,12 +4,14 @@ from modules import scripts_postprocessing, devices, scripts
 import gradio as gr
 
 from modules.ui_components import FormRow
+from modules.ui import create_refresh_button
 
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
 import hitherdither
+import cv2
 
 from pixelization.models.networks import define_G
 import pixelization.models.c2pGen
@@ -135,6 +137,62 @@ class Model(torch.nn.Module):
                 alias_state["module." + str(p)] = alias_state.pop(p)
             self.alias_net.load_state_dict(alias_state)
 
+def refresh_palette_list():
+    palettes = ["None"]
+    palettes.extend(os.listdir(os.path.join(os.path.dirname(__file__), '..', 'palettes')))
+    return palettes
+
+def pixelize(img, palette_method, dithering_strength, color_count, dither, palette):
+    palette_methods = {
+                "Median cut": Image.Quantize.MEDIANCUT,
+                "Maximum coverage": Image.Quantize.MAXCOVERAGE,
+                "Fast octree": Image.Quantize.FASTOCTREE
+            }
+    quantize = palette_methods.get(palette_method, None)
+    threshold = int((16*dithering_strength)/4)
+    
+    palImg = None
+    if palette is not None:
+        print(palette, '\n')
+        palImg = cv2.cvtColor(palette, cv2.COLOR_BGR2RGB)
+        palImg = Image.fromarray(palImg).convert("RGB")
+        color_count = len((palImg).getcolors(16777216))
+    
+    if color_count > 0:
+        plt = []
+        pltInt = []
+        if palImg is not None:
+            for i in palImg.convert("RGB").getcolors(16777216):
+                plt.append(i[1])
+                pltInt.append(i[1][0])
+                pltInt.append(i[1][2])
+                pltInt.append(i[1][1])
+                
+        else:
+            for i in img.convert("RGB").getcolors(16777216):
+                plt.append(i[1])
+                pltInt.append(i[1][0])
+                pltInt.append(i[1][2])
+                pltInt.append(i[1][1])
+
+        pltImg = Image.new("P", (1,1)).putpalette(pltInt)
+        img = img.quantize(
+            colors=int(color_count), 
+            method=quantize, 
+            kmeans=int(color_count),
+            dither=Image.Dither.NONE,
+            palette=pltImg,
+        ).convert("RGB")
+        img = adjust_gamma(img, 1.0 - (0.02 * dithering_strength))
+        print(color_count, plt, '\n')
+
+        plt = hitherdither.palette.Palette(plt)
+        img = hitherdither.ordered.bayer.bayer_dithering(
+            img, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
+    
+
+
+    return img
 
 def process(img):
     ow, oh = img.size
@@ -154,36 +212,16 @@ def process(img):
     return trans(img)[None, :, :, :]
 
 
-def to_image(tensor, pixel_size, upscale_after, color_palette, palette_method, dithering_strength, dither, when):
+def to_image(tensor, pixel_size, upscale_after, color_count, palette_method, dithering_strength, dither, when, palette):
     img = tensor.data[0].cpu().float().numpy()
     img = (np.transpose(img, (1, 2, 0)) + 1) / 2.0 * 255.0
     img = img.astype(np.uint8)
     img = Image.fromarray(img)
     img = img.resize((img.size[0]//4, img.size[1]//4), resample=Image.Resampling.NEAREST)
     
-    if when == 0: #after pixelization
-        palette_methods = {
-                "Median cut": Image.Quantize.MEDIANCUT,
-                "Maximum coverage": Image.Quantize.MAXCOVERAGE,
-                "Fast octree": Image.Quantize.FASTOCTREE
-            }
-        quantize = palette_methods.get(palette_method, None)
-        threshold = int((16*dithering_strength)/4)
-        if color_palette > 0:
-            img = img.quantize(
-                colors=int(color_palette), method=quantize, kmeans=int(color_palette), dither=Image.Dither.NONE).convert("RGB")
-            
-            img = adjust_gamma(img, 1.0 - (0.02 * dithering_strength))
-
-
-            plt = []
-            for i in img.convert("RGB").getcolors(16777216):
-                plt.append(i[1])
-
-            plt = hitherdither.palette.Palette(plt)
-            img = hitherdither.ordered.bayer.bayer_dithering(
-                img, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
-
+    if when == 0: #after pixelization\
+        img = pixelize(img=img, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palette=palette)
+        
     if upscale_after:
         img = img.resize((img.size[0]*pixel_size, img.size[1]*pixel_size), resample=Image.Resampling.NEAREST)
 
@@ -215,7 +253,7 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 pixel_size = gr.Slider(minimum=1, maximum=16, step=1, label="Pixel size", value=4, elem_id="pixelization_pixel_size")
         
             with gr.Column():
-                color_palette = gr.Slider(minimum=0, maximum=256, step=1, value=16, label="Color palette size (set to 0 to keep all colors)")
+                color_count = gr.Slider(minimum=0, maximum=256, step=1, value=16, label="Color palette size (set to 0 to keep all colors)")
 
             with gr.Column():
                 with FormRow():
@@ -224,44 +262,37 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
             with gr.Row():
                 dither = gr.Dropdown(choices=["Bayer 2x2", "Bayer 4x4", "Bayer 8x8"], label="Dither Style", value="Bayer 4x4", type="index")
                 dithering_strength = gr.Slider(minimum=1, maximum=16, step=1, label="Dithering Strength", value=2, elem_id="dithering_strength_value")
+            with gr.Row():
+                palette_dropdown = gr.Dropdown(
+                    choices=refresh_palette_list(), label="Palette", value="None", type="value"
+                )
+                create_refresh_button(palette_dropdown, refresh_palette_list, lambda: {"choices": refresh_palette_list()}, None)
 
         return {
             "enable": enable,
             "upscale_after": upscale_after,
             "pixel_size": pixel_size,
-            "color_palette": color_palette,
+            "color_count": color_count,
             "palette_method": palette_method,
             "dithering_strength": dithering_strength,
             "dither": dither,
             "when": when,
+            "palette_dropdown": palette_dropdown,
         }
 
-    def process(self, pp: scripts_postprocessing.PostprocessedImage, enable, upscale_after, pixel_size, color_palette, palette_method, dithering_strength, dither, when):
+    def process(self, pp: scripts_postprocessing.PostprocessedImage, enable, upscale_after, pixel_size, color_count, palette_method, dithering_strength, dither, when, palette_dropdown):
         if not enable:
             return
 
+        palette = None
+        if palette_dropdown != "None":
+            palette = cv2.cvtColor(cv2.imread(
+                os.path.join(os.path.dirname(__file__), '..', 'palettes', palette_dropdown)),
+                cv2.COLOR_RGB2BGR
+            )
+
         if when == 1: #before pixelization
-            palette_methods = {
-                "Median cut": Image.Quantize.MEDIANCUT,
-                "Maximum coverage": Image.Quantize.MAXCOVERAGE,
-                "Fast octree": Image.Quantize.FASTOCTREE
-            }
-            quantize = palette_methods.get(palette_method, None)
-            threshold = int((16*dithering_strength)/4)
-            if color_palette > 0:
-                pp.image = pp.image.quantize(
-                    colors=int(color_palette), method=quantize, kmeans=int(color_palette), dither=Image.Dither.NONE).convert("RGB")
-                
-                pp.image = adjust_gamma(pp.image, 1.0 - (0.02 * dithering_strength)) #todo: adds dithering strenght slider to UI
-
-                plt = []
-                for i in pp.image.convert("RGB").getcolors(16777216):
-                    plt.append(i[1])
-
-                plt = hitherdither.palette.Palette(plt)
-                pp.image = hitherdither.ordered.bayer.bayer_dithering(
-                    pp.image, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
-
+            pp.image = pixelize(img=pp.image, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palette=palette)
             
         if pixel_size > 1:
             if self.model is None:
@@ -283,12 +314,12 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 images = self.model.G_A_net.module.RGBDec(feature, adain_params)
                 out_t = self.model.alias_net(images)
 
-                pp.image = to_image(out_t, pixel_size=pixel_size, upscale_after=upscale_after, color_palette=color_palette, palette_method=palette_method, dithering_strength=dithering_strength, dither=dither, when=when)
+                pp.image = to_image(out_t, pixel_size=pixel_size, upscale_after=upscale_after, color_count=color_count, palette_method=palette_method, dithering_strength=dithering_strength, dither=dither, when=when, palette=palette)
 
             self.model.to(devices.cpu)
 
         pp.info["Pixelization pixel size"] = pixel_size
-        pp.info["Pixelization color palette"] = color_palette
+        pp.info["Pixelization color count"] = color_count
         pp.info["Pixelization palette method"] = palette_method
         pp.info["Dither Strength"] = dithering_strength
         pp.info["Dither Style"] = dither
