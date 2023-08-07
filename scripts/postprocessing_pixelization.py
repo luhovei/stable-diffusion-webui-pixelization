@@ -142,7 +142,7 @@ def refresh_palette_list():
     palettes.extend(os.listdir(os.path.join(os.path.dirname(__file__), '..', 'palettes')))
     return palettes
 
-def pixelize(img, palette_method, dithering_strength, color_count, dither, palette):
+def ditherize_and_palettize(img, palette_method, dithering_strength, color_count, dither, palImg):
     palette_methods = {
                 "Median cut": Image.Quantize.MEDIANCUT,
                 "Maximum coverage": Image.Quantize.MAXCOVERAGE,
@@ -151,44 +151,27 @@ def pixelize(img, palette_method, dithering_strength, color_count, dither, palet
     quantize = palette_methods.get(palette_method, None)
     threshold = int((16*dithering_strength)/4)
     
-    palImg = None
-    if palette is not None:
-        palImg = cv2.cvtColor(palette, cv2.COLOR_BGR2RGB)
-        palImg = Image.fromarray(palImg).convert("RGB")
-        color_count = len((palImg).getcolors(16777216))
-    
     if color_count > 0:
         plt = []
-        pltInt = []
-        if palImg is not None:
-            for i in palImg.convert("RGB").getcolors(16777216):
+        if palImg is not None: #use palette image
+            img = adjust_gamma(img, 1.0 - (0.02 * dithering_strength))
+            for i in palImg.getcolors(16777216):
                 plt.append(i[1])
-                pltInt.append(i[1][0])
-                pltInt.append(i[1][2])
-                pltInt.append(i[1][1])
-                
-        else:
+            
+        else: #go with the current img and color restrictions
+            img = img.quantize(
+                colors=int(color_count), 
+                method=quantize, 
+                kmeans=int(color_count),
+                dither=Image.Dither.NONE,
+            ).convert("RGB")
+            img = adjust_gamma(img, 1.0 - (0.03 * dithering_strength))
             for i in img.convert("RGB").getcolors(16777216):
                 plt.append(i[1])
-                pltInt.append(i[1][0])
-                pltInt.append(i[1][2])
-                pltInt.append(i[1][1])
-
-        pltImg = Image.new("P", (1,1)).putpalette(pltInt)
-        img = img.quantize(
-            colors=int(color_count), 
-            method=quantize, 
-            kmeans=int(color_count),
-            dither=Image.Dither.NONE,
-            palette=pltImg,
-        ).convert("RGB")
-        img = adjust_gamma(img, 1.0 - (0.02 * dithering_strength))
 
         plt = hitherdither.palette.Palette(plt)
         img = hitherdither.ordered.bayer.bayer_dithering(
             img, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
-    
-
 
     return img
 
@@ -210,7 +193,7 @@ def process(img):
     return trans(img)[None, :, :, :]
 
 
-def to_image(tensor, pixel_size, upscale_after, color_count, palette_method, dithering_strength, dither, when, palette):
+def to_image(tensor, pixel_size, upscale_after, color_count, palette_method, dithering_strength, dither, when, palImg):
     img = tensor.data[0].cpu().float().numpy()
     img = (np.transpose(img, (1, 2, 0)) + 1) / 2.0 * 255.0
     img = img.astype(np.uint8)
@@ -218,7 +201,7 @@ def to_image(tensor, pixel_size, upscale_after, color_count, palette_method, dit
     img = img.resize((img.size[0]//4, img.size[1]//4), resample=Image.Resampling.NEAREST)
     
     if when == 0: #after pixelization\
-        img = pixelize(img=img, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palette=palette)
+        img = ditherize_and_palettize(img=img, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palImg=palImg)
         
     if upscale_after:
         img = img.resize((img.size[0]*pixel_size, img.size[1]*pixel_size), resample=Image.Resampling.NEAREST)
@@ -282,15 +265,18 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
         if not enable:
             return
 
-        palette = None
+        palImg = None
         if palette_dropdown != "None":
             palette = cv2.cvtColor(cv2.imread(
                 os.path.join(os.path.dirname(__file__), '..', 'palettes', palette_dropdown)),
                 cv2.COLOR_RGB2BGR
             )
+            palImg = cv2.cvtColor(palette, cv2.COLOR_BGR2RGB)
+            palImg = Image.fromarray(palImg).convert("RGB")
+            color_count = len((palImg).getcolors(16777216))
 
         if when == 1: #before pixelization
-            pp.image = pixelize(img=pp.image, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palette=palette)
+            pp.image = ditherize_and_palettize(img=pp.image, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palImg=palImg)
             
         if pixel_size > 1:
             if self.model is None:
@@ -312,7 +298,7 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 images = self.model.G_A_net.module.RGBDec(feature, adain_params)
                 out_t = self.model.alias_net(images)
 
-                pp.image = to_image(out_t, pixel_size=pixel_size, upscale_after=upscale_after, color_count=color_count, palette_method=palette_method, dithering_strength=dithering_strength, dither=dither, when=when, palette=palette)
+                pp.image = to_image(out_t, pixel_size=pixel_size, upscale_after=upscale_after, color_count=color_count, palette_method=palette_method, dithering_strength=dithering_strength, dither=dither, when=when, palImg=palImg)
 
             self.model.to(devices.cpu)
 
@@ -321,4 +307,6 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
         pp.info["Pixelization palette method"] = palette_method
         pp.info["Dither Strength"] = dithering_strength
         pp.info["Dither Style"] = dither
+        if palette_dropdown is not None:
+            pp.info['Using custom pallete img'] = palette_dropdown
 
