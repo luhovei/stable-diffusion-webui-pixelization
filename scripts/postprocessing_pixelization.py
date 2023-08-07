@@ -153,7 +153,6 @@ def pixelize(img, palette_method, dithering_strength, color_count, dither, palet
     
     palImg = None
     if palette is not None:
-        print(palette, '\n')
         palImg = cv2.cvtColor(palette, cv2.COLOR_BGR2RGB)
         palImg = Image.fromarray(palImg).convert("RGB")
         color_count = len((palImg).getcolors(16777216))
@@ -184,7 +183,6 @@ def pixelize(img, palette_method, dithering_strength, color_count, dither, palet
             palette=pltImg,
         ).convert("RGB")
         img = adjust_gamma(img, 1.0 - (0.02 * dithering_strength))
-        print(color_count, plt, '\n')
 
         plt = hitherdither.palette.Palette(plt)
         img = hitherdither.ordered.bayer.bayer_dithering(
