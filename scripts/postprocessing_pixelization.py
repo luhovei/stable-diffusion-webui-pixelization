@@ -8,7 +8,7 @@ from modules.ui import create_refresh_button
 
 import torch
 import torchvision.transforms as transforms
-from PIL import Image
+from PIL import Image, ImageEnhance
 import numpy as np
 import hitherdither
 import cv2
@@ -138,8 +138,10 @@ class Model(torch.nn.Module):
             self.alias_net.load_state_dict(alias_state)
 
 def refresh_palette_list():
-    palettes = ["None"]
+    palettes = []
     palettes.extend(os.listdir(os.path.join(os.path.dirname(__file__), '..', 'palettes')))
+    palettes.sort()
+    palettes.insert(0, "None")
     return palettes
 
 def ditherize_and_palettize(img, palette_method, dithering_strength, color_count, dither, palImg):
@@ -154,7 +156,14 @@ def ditherize_and_palettize(img, palette_method, dithering_strength, color_count
     if color_count > 0:
         plt = []
         if palImg is not None: #use palette image
+            img = img.quantize(
+                colors=min(256, color_count*2), 
+                method=quantize, 
+                kmeans=min(256, color_count*2),
+                dither=Image.Dither.NONE,
+            ).convert("RGB")
             img = adjust_gamma(img, 1.0 - (0.02 * dithering_strength))
+            img = change_contrast(img, 1.0 + (0.02 * dithering_strength))
             for i in palImg.getcolors(16777216):
                 plt.append(i[1])
             
@@ -216,6 +225,11 @@ def adjust_gamma(image, gamma=1.0):
 
     # Apply the gamma correction using the lookup table
     return image.point(gamma_table)
+
+def change_contrast(image: Image, contrast_value: float):
+    enhancer = ImageEnhance.Contrast(image)
+    enhanced_image = enhancer.enhance(contrast_value)
+    return enhanced_image
 
 class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
     name = "Pixelization"
