@@ -13,8 +13,14 @@ import numpy as np
 import hitherdither
 import cv2
 
+from colorspacious import deltaE
+
 from pixelization.models.networks import define_G
 import pixelization.models.c2pGen
+
+print(
+    f"[-] Pixelization extension initialized"
+)
 
 pixelize_code = [
     233356.8125, -27387.5918, -32866.8008, 126575.0312, -181590.0156,
@@ -144,6 +150,34 @@ def refresh_palette_list():
     palettes.insert(0, "None")
     return palettes
 
+def index2rgb(arr, pal):
+    channels = [pal[arr, i] for i in range(3)]
+    return np.stack(channels, axis=-1)
+
+def palettize_by_color_distance(img, palImg):
+    palImgArr = []
+    for i in palImg.getcolors(16777216):
+        palImgArr.append(i[1])
+    palImgArr = np.array(palImgArr).astype(np.uint8)
+    imgArr = np.asarray(img, dtype="uint8")
+
+    dist_1 = np.repeat(imgArr[..., 0, np.newaxis], palImgArr.shape[0], axis=2)
+    dist_2 = np.repeat(imgArr[..., 1, np.newaxis], palImgArr.shape[0], axis=2)
+    dist_3 = np.repeat(imgArr[..., 2, np.newaxis], palImgArr.shape[0], axis=2)
+
+    distances = np.stack((dist_1, dist_2, dist_3), axis=3)
+    del dist_1, dist_2, dist_3
+
+    newDist = []
+    for x in distances:
+        newDist.append(deltaE(x, palImgArr, input_space="sRGB255"))
+
+    newDist = [[a for a in newDist]]
+    newDist = np.concatenate(newDist)
+    img_quantized = np.array(newDist.argmin(axis=2))
+
+    return index2rgb(img_quantized, palImgArr)
+
 def ditherize_and_palettize(img, palette_method, dithering_strength, color_count, dither, palImg):
     palette_methods = {
                 "Median cut": Image.Quantize.MEDIANCUT,
@@ -156,17 +190,24 @@ def ditherize_and_palettize(img, palette_method, dithering_strength, color_count
     if color_count > 0:
         plt = []
         if palImg is not None: #use palette image
-            img = img.quantize(
-                colors=min(256, color_count*2), 
-                method=quantize, 
-                kmeans=min(256, color_count*2),
-                dither=Image.Dither.NONE,
-            ).convert("RGB")
             img = adjust_gamma(img, 1.0 - (0.02 * dithering_strength))
             img = change_contrast(img, 1.0 + (0.02 * dithering_strength))
-            for i in palImg.getcolors(16777216):
+            img = img.quantize(
+                colors=min(256, color_count*4), 
+                method=quantize, 
+                kmeans=min(256, color_count*4),
+                dither=Image.Dither.NONE,
+            ).convert("RGB")
+
+            for i in img.convert("RGB").getcolors(16777216):
                 plt.append(i[1])
             
+            plt = hitherdither.palette.Palette(plt)
+            img = hitherdither.ordered.bayer.bayer_dithering(
+                img, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
+
+            img_quantized = palettize_by_color_distance(img, palImg)
+            img = Image.fromarray(img_quantized)
         else: #go with the current img and color restrictions
             img = img.quantize(
                 colors=int(color_count), 
@@ -178,9 +219,9 @@ def ditherize_and_palettize(img, palette_method, dithering_strength, color_count
             for i in img.convert("RGB").getcolors(16777216):
                 plt.append(i[1])
 
-        plt = hitherdither.palette.Palette(plt)
-        img = hitherdither.ordered.bayer.bayer_dithering(
-            img, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
+            plt = hitherdither.palette.Palette(plt)
+            img = hitherdither.ordered.bayer.bayer_dithering(
+                img, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
 
     return img
 
