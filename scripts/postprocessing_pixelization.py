@@ -218,19 +218,29 @@ def ditherize_and_palettize(img, palette_method, dithering_strength, color_count
             img_quantized = palettize_by_color_distance(img, palImg)
             img = Image.fromarray(img_quantized)
         else: #go with the current img and color restrictions
-            img = img.quantize(
-                colors=int(color_count), 
-                method=quantize, 
-                kmeans=int(color_count),
-                dither=Image.Dither.NONE,
-            ).convert("RGB")
             img = adjust_gamma(img, 1.0 - (0.03 * dithering_strength))
-            for i in img.convert("RGB").getcolors(16777216):
+            img = change_contrast(img, 1.0 + (0.05 * dithering_strength))
+            
+            quantImg = img.quantize(
+                colors=min(256, color_count * 5), 
+                method=quantize, 
+                kmeans=min(256, color_count * 5),
+                dither=Image.Dither.FLOYDSTEINBERG,
+            ).convert("RGB")
+            
+            for i in quantImg.convert("RGB").getcolors(16777216):
                 plt.append(i[1])
 
             plt = hitherdither.palette.Palette(plt)
             img = hitherdither.ordered.bayer.bayer_dithering(
                 img, plt, [threshold, threshold, threshold], order=2**(dither+1)).convert("RGB")
+            
+            img = img.quantize(
+                colors=int(color_count), 
+                method=quantize, 
+                kmeans=int(color_count),
+                dither=Image.Dither.FLOYDSTEINBERG,
+            ).convert("RGB")
 
     return img
 
@@ -257,13 +267,14 @@ def to_image(tensor, pixel_size, upscale_after, color_count, palette_method, dit
     img = (np.transpose(img, (1, 2, 0)) + 1) / 2.0 * 255.0
     img = img.astype(np.uint8)
     img = Image.fromarray(img)
-    img = img.resize((img.size[0]//4, img.size[1]//4), resample=Image.NEAREST)
+    img = img.resize((img.size[0]//4, img.size[1]//4), resample=Image.Resampling.BICUBIC)
     
     if when == 0: #after pixelization\
         if pixel_size[0] < pixel_size[1]:
             img = img.resize(((img.size[0]), round(img.size[1] * (pixel_size[1]/pixel_size[0]))), resample=Image.NEAREST)
         else:
             img = img.resize((round(img.size[0] * (pixel_size[0]/pixel_size[1])), (img.size[1])), resample=Image.NEAREST)
+        
         img = ditherize_and_palettize(img=img, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palImg=palImg)
         
     if upscale_after:
@@ -363,7 +374,7 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                     (pp.image.width // pixel_size_x) * 4, 
                     (pp.image.height // pixel_size_y) * 4
                 ), 
-                # Image.BICUBIC
+                Image.NEAREST
             )
             
             with torch.no_grad():
