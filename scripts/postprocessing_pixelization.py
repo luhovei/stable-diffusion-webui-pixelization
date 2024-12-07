@@ -178,35 +178,35 @@ def palettize_by_color_distance(img, palImg):
 
     return index2rgb(img_quantized, palImgArr)
 
-def ditherize_and_palettize(img, palette_method, dithering_strength, color_count, dither, palImg):
+def ditherize_and_palettize(img, palette_method, dithering_strength, color_count, dither, palImg, adjusted_contrast, adjusted_gamma):
     palette_methods = {
                 "Median cut": Image.Quantize.MEDIANCUT,
                 "Maximum coverage": Image.Quantize.MAXCOVERAGE,
                 "Fast octree": Image.Quantize.FASTOCTREE
             }
     quantize = palette_methods.get(palette_method, None)
-    threshold = int((16*dithering_strength)/4)
+    threshold = int((16*dithering_strength)/4) if dither != 3 else 0
     
     if color_count > 0:
         plt = []
         if palImg is not None: #use palette image
             palImgArr = []
             
-            palImg = adjust_gamma(palImg, 1.0 - (0.03 * dithering_strength))
-            palImg = change_contrast(palImg, 1.0 + (0.05 * dithering_strength))
+            if adjusted_contrast > 0:
+                palImg = change_contrast(palImg, 1.0 + (0.05 * adjusted_contrast))
+                
+            if adjusted_gamma > 0:
+                palImg = adjust_gamma(palImg, 1.0 + (0.03 * adjusted_gamma))
             
             for i in palImg.getcolors(16777216):
                 palImgArr.append(i[1])
             
             img = img.quantize(
-                colors=min(256, len(palImgArr)*5), 
+                colors=min(256, len(palImgArr)*6), 
                 method=quantize, 
-                kmeans=min(256, len(palImgArr)*5),
+                kmeans=min(256, len(palImgArr)*6),
                 dither=Image.Dither.FLOYDSTEINBERG,
             ).convert("RGB")
-
-            img = adjust_gamma(img, 1.0 - (0.03 * dithering_strength))
-            img = change_contrast(img, 1.0 + (0.05 * dithering_strength))
 
             for i in img.convert("RGB").getcolors(16777216):
                 plt.append(i[1])
@@ -218,13 +218,17 @@ def ditherize_and_palettize(img, palette_method, dithering_strength, color_count
             img_quantized = palettize_by_color_distance(img, palImg)
             img = Image.fromarray(img_quantized)
         else: #go with the current img and color restrictions
-            img = adjust_gamma(img, 1.0 - (0.03 * dithering_strength))
-            img = change_contrast(img, 1.0 + (0.05 * dithering_strength))
+            
+            if adjusted_contrast > 0:
+                img = change_contrast(img, 1.0 + (0.05 * adjusted_contrast))
+                
+            if adjusted_gamma > 0:
+                img = adjust_gamma(img, 1.0 + (0.03 * adjusted_gamma))
             
             quantImg = img.quantize(
-                colors=min(256, color_count * 5), 
+                colors=min(256, color_count * 6), 
                 method=quantize, 
-                kmeans=min(256, color_count * 5),
+                kmeans=min(256, color_count * 6),
                 dither=Image.Dither.FLOYDSTEINBERG,
             ).convert("RGB")
             
@@ -262,12 +266,12 @@ def process(img):
     return trans(img)[None, :, :, :]
 
 
-def to_image(tensor, pixel_size, upscale_after, color_count, palette_method, dithering_strength, dither, when, palImg):
+def to_image(tensor, pixel_size, upscale_after, color_count, palette_method, dithering_strength, dither, when, palImg, adjusted_contrast, adjusted_gamma):
     img = tensor.data[0].cpu().float().numpy()
     img = (np.transpose(img, (1, 2, 0)) + 1) / 2.0 * 255.0
     img = img.astype(np.uint8)
     img = Image.fromarray(img)
-    img = img.resize((img.size[0]//4, img.size[1]//4), resample=Image.Resampling.BICUBIC)
+    img = img.resize((img.size[0]//4, img.size[1]//4), resample=Image.Resampling.BILINEAR)
     
     if when == 0: #after pixelization\
         if pixel_size[0] < pixel_size[1]:
@@ -275,7 +279,16 @@ def to_image(tensor, pixel_size, upscale_after, color_count, palette_method, dit
         else:
             img = img.resize((round(img.size[0] * (pixel_size[0]/pixel_size[1])), (img.size[1])), resample=Image.NEAREST)
         
-        img = ditherize_and_palettize(img=img, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palImg=palImg)
+        img = ditherize_and_palettize(
+                img=img, 
+                palette_method=palette_method, 
+                dithering_strength=dithering_strength, 
+                color_count=color_count, 
+                dither=dither, 
+                palImg=palImg, 
+                adjusted_contrast=adjusted_contrast, 
+                adjusted_gamma=adjusted_gamma
+            )
         
     if upscale_after:
         img = img.resize((img.size[0]*(min(pixel_size)), img.size[1]*min(pixel_size)), resample=Image.NEAREST)
@@ -313,21 +326,25 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 pixel_size_x = gr.Slider(minimum=1, maximum=16, step=1, label="Pixel size X", value=4, elem_id="pixelization_pixel_size_x")
                 pixel_size_y = gr.Slider(minimum=1, maximum=16, step=1, label="Pixel size Y", value=4, elem_id="pixelization_pixel_size_y")
         
-            with gr.Column():
-                color_count = gr.Slider(minimum=0, maximum=256, step=1, value=16, label="Color palette size (set to 0 to keep all colors)")
-
+        with FormRow():
             with gr.Column():
                 with FormRow():
-                        palette_methods = ['Median cut', 'Maximum coverage', 'Fast octree']
-                        palette_method = gr.Radio(choices=palette_methods, value=palette_methods[0], label='Palette extraction method')
-            with gr.Row():
-                dither = gr.Dropdown(choices=["Bayer 2x2", "Bayer 4x4", "Bayer 8x8"], label="Dither Style", value="Bayer 4x4", type="index")
-                dithering_strength = gr.Slider(minimum=1, maximum=16, step=1, label="Dithering Strength", value=2, elem_id="dithering_strength_value")
-            with gr.Row():
-                palette_dropdown = gr.Dropdown(
-                    choices=refresh_palette_list(), label="Palette", value="None", type="value"
-                )
-                create_refresh_button(palette_dropdown, refresh_palette_list, lambda: {"choices": refresh_palette_list()}, None)
+                    color_count = gr.Slider(minimum=0, maximum=256, step=1, value=16, label="Color palette size (set to 0 to keep all colors)")
+                    palette_methods = ['Median cut', 'Maximum coverage', 'Fast octree']
+                    palette_method = gr.Radio(choices=palette_methods, value=palette_methods[0], label='Palette extraction method')
+            with gr.Column():
+                with FormRow():
+                    dither = gr.Dropdown(choices=["Bayer 2x2", "Bayer 4x4", "Bayer 8x8", "None"], label="Dither Style", value="Bayer 4x4", type="index")
+                    dithering_strength = gr.Slider(minimum=0, maximum=32, step=1, value=2, label="Dithering Strength", elem_id="dithering_strength_id")
+        with FormRow():
+            with gr.Column():
+                with gr.Row():
+                    palette_dropdown = gr.Dropdown(
+                        choices=refresh_palette_list(), label="Custom Color Palette", value="None", type="value"
+                    )
+                    create_refresh_button(palette_dropdown, refresh_palette_list, lambda: {"choices": refresh_palette_list()}, None)
+                adjusted_contrast = gr.Slider(minimum=0, maximum=16, step=1, value=1, label="Adjust Contrast")
+                adjusted_gamma = gr.Slider(minimum=0, maximum=16, step=1, value=1, label="Adjust Gamma")
 
         return {
             "enable": enable,
@@ -340,9 +357,11 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
             "dither": dither,
             "when": when,
             "palette_dropdown": palette_dropdown,
+            "adjusted_contrast": adjusted_contrast,
+            "adjusted_gamma": adjusted_gamma
         }
 
-    def process(self, pp: scripts_postprocessing.PostprocessedImage, enable, upscale_after, pixel_size_x, pixel_size_y, color_count, palette_method, dithering_strength, dither, when, palette_dropdown):
+    def process(self, pp: scripts_postprocessing.PostprocessedImage, enable, upscale_after, pixel_size_x, pixel_size_y, color_count, palette_method, dithering_strength, dither, when, palette_dropdown, adjusted_contrast, adjusted_gamma):
         if not enable:
             return
 
@@ -357,7 +376,7 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
             color_count = len((palImg).getcolors(16777216))
 
         if when == 1: #before pixelization
-            pp.image = ditherize_and_palettize(img=pp.image, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palImg=palImg)
+            pp.image = ditherize_and_palettize(img=pp.image, palette_method=palette_method, dithering_strength=dithering_strength, color_count=color_count, dither=dither, palImg=palImg, adjusted_contrast=adjusted_contrast, adjusted_gamma=adjusted_gamma)
             
         if pixel_size_x > 1 and pixel_size_y > 1:
             if self.model is None:
@@ -374,7 +393,7 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                     (pp.image.width // pixel_size_x) * 4, 
                     (pp.image.height // pixel_size_y) * 4
                 ), 
-                Image.NEAREST
+                Image.Resampling.LANCZOS
             )
             
             with torch.no_grad():
@@ -387,7 +406,7 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
                 images = self.model.G_A_net.module.RGBDec(feature, adain_params)
                 out_t = self.model.alias_net(images)
 
-                pp.image = to_image(out_t, pixel_size=(pixel_size_x, pixel_size_y), upscale_after=upscale_after, color_count=color_count, palette_method=palette_method, dithering_strength=dithering_strength, dither=dither, when=when, palImg=palImg)
+                pp.image = to_image(out_t, pixel_size=(pixel_size_x, pixel_size_y), upscale_after=upscale_after, color_count=color_count, palette_method=palette_method, dithering_strength=dithering_strength, dither=dither, when=when, palImg=palImg, adjusted_contrast=adjusted_contrast, adjusted_gamma=adjusted_gamma)
 
             self.model.to(devices.cpu)
 
@@ -397,6 +416,8 @@ class ScriptPostprocessingUpscale(scripts_postprocessing.ScriptPostprocessing):
         pp.info["Pixelization palette method"] = palette_method
         pp.info["Dither Strength"] = dithering_strength
         pp.info["Dither Style"] = dither
+        pp.info["Adjusted Contrast"] = adjusted_contrast
+        pp.info["Adjusted Gamma"] = adjusted_gamma
         if palette_dropdown is not None:
             pp.info['Using custom pallete img'] = palette_dropdown
 
